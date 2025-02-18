@@ -20,6 +20,7 @@ CONFIG_DIR="$HOME/Downloads/yt-dlp/config"
 OUTPUT_FILE="%(title)s.%(ext)s"
 SEMAPHORE_LIMIT=2  # Maximum number of concurrent downloads
 TIMEOUT_SECONDS=7200  # 2 hours timeout per download (in seconds)
+COOKIES=""  # Optional cookie file
 
 # Config and log files
 SEMAPHORE_FILE="$CONFIG_DIR/semaphore.count"
@@ -105,9 +106,17 @@ process_queue() {
             echo "[NEW DOWNLOAD] Downloading: $QUEUED_URL" >> "$LOG_FILE" 2>&1
             if ! command -v timeout &> /dev/null; then
                 echo "Install coreutils for timeout support (brew install coreutils)" >> "$LOG_FILE"
-                yt-dlp --restrict-filenames -o "$DOWNLOADS_DIR/$OUTPUT_FILE" "$QUEUED_URL" >> "$LOG_FILE" 2>&1
+                if [[ -n "$COOKIES" && -f "$COOKIES" ]]; then
+                    yt-dlp --no-progress --restrict-filenames --cookies "$COOKIES" -o "$DOWNLOADS_DIR/$OUTPUT_FILE" "$QUEUED_URL" >> "$LOG_FILE" 2>&1
+                else
+                    yt-dlp --no-progress --restrict-filenames -o "$DOWNLOADS_DIR/$OUTPUT_FILE" "$QUEUED_URL" >> "$LOG_FILE" 2>&1
+                fi
             else
-                timeout "$TIMEOUT_SECONDS" yt-dlp --restrict-filenames -o "$DOWNLOADS_DIR/$OUTPUT_FILE" "$QUEUED_URL" >> "$LOG_FILE" 2>&1
+                if [[ -n "$COOKIES" && -f "$COOKIES" ]]; then
+                    timeout "$TIMEOUT_SECONDS" yt-dlp --no-progress --restrict-filenames --cookies "$COOKIES" -o "$DOWNLOADS_DIR/$OUTPUT_FILE" "$QUEUED_URL" >> "$LOG_FILE" 2>&1
+                else
+                    timeout "$TIMEOUT_SECONDS" yt-dlp --no-progress --restrict-filenames -o "$DOWNLOADS_DIR/$OUTPUT_FILE" "$QUEUED_URL" >> "$LOG_FILE" 2>&1
+                fi
             fi
             DOWNLOAD_RESULT=$?
 
