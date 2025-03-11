@@ -6,16 +6,31 @@
 #
 # Options:
 #   -s <subtitle track>   Extract only the specified subtitle track number.
-#   -l                    List subtitle track IDs only (without full path echoes).
+#   -l                    List subtitle track details (ID, language, name, and codec) only.
 #
 # This script uses mkvmerge and mkvextract (from MKVToolNix) to list or extract subtitle tracks.
-# When listing, it filters mkvmerge's output to show only subtitle track IDs.
+# In listing mode, it outputs detailed subtitle track information (ID, language, name, codec).
+# In extraction mode, subtitles are renamed based on the subtitle track name and proper extension
+# based on the codec (e.g., .ass for ASS subtitles, .srt for SubRip).
 #
-# Ensure MKVToolNix is installed and that mkvmerge and mkvextract are in your PATH.
+# Ensure MKVToolNix and jq are installed and that mkvmerge, mkvextract, and jq are in your PATH.
 
 usage() {
   echo "Usage: $0 [-s <subtitle track>] [-l] /path/to/directory"
   exit 1
+}
+
+determine_extension() {
+  codec="$1"
+  if echo "$codec" | grep -qi "ASS\|SSA\|SubStationAlpha"; then
+    echo ".ass"
+  elif echo "$codec" | grep -qi "SubRip"; then
+    echo ".srt"
+  elif echo "$codec" | grep -qi "HDMV PGS\|S_HDMV/PGS"; then
+    echo ".sup"
+  else
+    echo ".srt" # Default fallback
+  fi
 }
 
 # Initialize variables.
@@ -43,16 +58,22 @@ while getopts ":s:l" opt; do
 done
 shift $((OPTIND - 1))
 
-# Ensure the directory argument is provided.
+# Check if directory argument is provided, otherwise use current directory
 if [ $# -eq 0 ]; then
-  usage
+  directory="."
+else
+  directory="$1"
 fi
-
-directory="$1"
 
 # Check if the provided path is a directory.
 if [ ! -d "$directory" ]; then
   echo "Error: Directory '$directory' does not exist." >&2
+  exit 1
+fi
+
+# Ensure jq is installed.
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required for processing subtitle details." >&2
   exit 1
 fi
 
@@ -61,33 +82,46 @@ shopt -s nullglob
 for file in "$directory"/*.mkv; do
   basefile=$(basename "$file")
   if [ "$list_tracks" = true ]; then
-    echo "Subtitle track IDs in $basefile:"
-    # List only lines with "subtitles" and extract the track ID.
-    mkvmerge -i "$file" | grep -i "subtitles" | while IFS= read -r line; do
-      track_id=$(echo "$line" | awk '{print $3}' | sed 's/://')
-      echo "Subtitle track ID: $track_id"
-    done
+    echo "Subtitle track details in $basefile:"
+    mkvmerge -J "$file" | jq -r '.tracks[] | select(.type=="subtitles") | "ID: \(.id)  Language: \(.properties.language)  Name: \(.properties.track_name)  Codec: \(.codec)"'
     echo "--------------------------------"
   else
     echo "Processing file: $basefile"
+    json=$(mkvmerge -J "$file")
     if [ -n "$subtitle_track" ]; then
-      output_file="${file%.*}.subtitle_${subtitle_track}.srt"
-      base_output_file=$(basename "$output_file")
-      echo "Extracting subtitle track $subtitle_track from $basefile to $base_output_file"
+      # Find the subtitle track with the given id.
+      track_json=$(echo "$json" | jq -c ".tracks[] | select(.type==\"subtitles\" and .id==$subtitle_track)")
+      if [ -z "$track_json" ]; then
+        echo "Subtitle track $subtitle_track not found in $basefile" >&2
+        continue
+      fi
+      track_name=$(echo "$track_json" | jq -r '.properties.track_name')
+      codec=$(echo "$track_json" | jq -r '.codec')
+      ext=$(determine_extension "$codec")
+      if [ -z "$track_name" ] || [ "$track_name" = "null" ]; then
+        track_name="$subtitle_track"
+      fi
+      sanitized_track_name=$(echo "$track_name" | sed -E 's/[^A-Za-z0-9._-]+/_/g')
+      output_file="${file%.*}.${sanitized_track_name}${ext}"
+      echo "Extracting subtitle track $subtitle_track ($track_name, Codec: $codec) from $basefile to $(basename "$output_file")"
       mkvextract tracks "$file" ${subtitle_track}:"$output_file"
     else
       echo "Identifying subtitle tracks in $basefile..."
-      track_info=$(mkvmerge -i "$file")
-      while IFS= read -r line; do
-        if echo "$line" | grep -qi "subtitles"; then
-          track_id=$(echo "$line" | awk '{print $3}' | sed 's/://')
-          output_file="${file%.*}_subtitle_${track_id}.srt"
-          base_output_file=$(basename "$output_file")
-          echo "Extracting subtitle track $track_id to $base_output_file"
-          mkvextract tracks "$file" ${track_id}:"$output_file"
+      echo "$json" | jq -c '.tracks[] | select(.type=="subtitles")' | while IFS= read -r track; do
+        id=$(echo "$track" | jq -r '.id')
+        track_name=$(echo "$track" | jq -r '.properties.track_name')
+        codec=$(echo "$track" | jq -r '.codec')
+        ext=$(determine_extension "$codec")
+        if [ -z "$track_name" ] || [ "$track_name" = "null" ]; then
+          track_name="$id"
         fi
-      done <<<"$track_info"
+        sanitized_track_name=$(echo "$track_name" | sed -E 's/[^A-Za-z0-9._-]+/_/g')
+        output_file="${file%.*}_${sanitized_track_name}${ext}"
+        echo "Extracting subtitle track $id ($track_name, Codec: $codec) to $(basename "$output_file")"
+        mkvextract tracks "$file" ${id}:"$output_file"
+      done
     fi
+    echo "--------------------------------"
   fi
 done
 
